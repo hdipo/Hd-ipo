@@ -1,0 +1,17 @@
+{
+  "name": "HD IPO - Live GMP & Analyst",
+  "short_name": "HD IPO",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#1d4ed8",
+  "theme_color": "#1d4ed8",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
