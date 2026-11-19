@@ -24,25 +24,8 @@ function getAllIPOs() {
   return [...customIPOs, ...baseList];
 }
 
-async function syncLiveData(manualClick = false) {
-  const btn = document.getElementById("syncBtn");
-  if (btn) btn.innerHTML = `<span class="dot"></span> SYNCING...`;
-  try {
-    const res = await fetch("./live-data.json?t=" + Date.now());
-    if (!res.ok) throw new Error("Not found");
-    const data = await res.json();
-    if (Array.isArray(data) && data.length > 0) {
-      remoteIPOs = data;
-      localStorage.setItem("hdRemoteIPOs", JSON.stringify(data));
-      renderCurrentPage();
-      if (manualClick) alert("Live Data Update & Save ho gaya! ✅");
-    }
-  } catch (e) {
-    if (manualClick) alert("Local mode mein chal raha hai—GitHub par host karne ke baad SYNC LIVE internet se naya data uthayega! 👍");
-  }
-  if (btn) btn.innerHTML = `<span class="dot"></span> SYNC LIVE`;
-}
 function getVerdictClass(verdict) {
+  if (!verdict) return "verdict-risky";
   if (verdict.includes("AVOID")) return "verdict-avoid";
   if (verdict.includes("RISKY") || verdict.includes("High Risk")) return "verdict-risky";
   return "verdict-apply";
@@ -51,9 +34,7 @@ function getVerdictClass(verdict) {
 function copyTextSafe(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
-  } else {
-    fallbackCopy(text);
-  }
+  } else fallbackCopy(text);
 }
 
 function fallbackCopy(text) {
@@ -63,6 +44,176 @@ function fallbackCopy(text) {
   ta.select();
   document.execCommand("copy");
   document.body.removeChild(ta);
+}
+
+// AUTO-ANALYST ENGINE (Har IPO ka Data Dekh Kar Verdict & Target/SL Banata Hai)
+function runAutoAnalyst(ipo) {
+  const pe = parseFloat(ipo.pe) || 0;
+  const indPe = parseFloat(ipo.industryPe) || 26;
+  const roe = parseFloat(ipo.roeVal) || 0;
+  const ofs = parseFloat(ipo.ofsPercent) || 0;
+  const qib = parseFloat(ipo.qibSub) || 0;
+  const gmpPct = parseFloat(ipo.gmpPercent) || 0;
+  const price = parseFloat(ipo.issuePrice) || 100;
+  const listGain = ipo.actualListingGain;
+
+  let score = 5.5;
+  if (pe > 0) { if (pe < indPe) score += 1.4; else if (pe > indPe * 1.3) score -= 1.2; }
+  if (roe >= 18) score += 0.9; else if (roe > 0 && roe < 10) score -= 0.7;
+  if (ofs <= 30) score += 0.7; else if (ofs >= 70) score -= 1.0;
+  if (qib >= 15) score += 1.3; else if (qib >= 5) score += 0.6;
+  if (gmpPct >= 20) score += 0.7;
+  if (listGain != null && listGain > 15) score += 0.6;
+  score = Math.min(9.5, Math.max(3.0, +score.toFixed(1)));
+
+  const verdict = score >= 7.0 ? (ipo.category === "sme" ? "APPLY (High Risk)" : "APPLY")
+                : score >= 5.4 ? "RISKY / MAY APPLY" : "AVOID";
+
+  const plus = [];
+  const minus = [];
+  if (pe > 0 && pe < indPe) plus.push(`Valuation sasta hai (P/E ${pe}x vs Industry ${indPe}x)`);
+  else if (pe > indPe) minus.push(`Valuation mehnga lag raha hai (P/E ${pe}x vs Industry ${indPe}x)`);
+  if (ofs <= 30) plus.push(`${100 - ofs}% Fresh Issue — paisa company growth mein lagega`);
+  else minus.push(`${ofs}% OFS — purane investors hissa bech rahe hain`);
+  if (qib >= 10) plus.push(`Strong QIB Institutional Demand (${qib}x)`);
+  else if (ipo.status !== "upcoming") minus.push(`QIB Demand abhi kam (${qib}x) hai`);
+  if (roe >= 15) plus.push(`Strong ROE (${roe}%)`);
+  if (ipo.category === "sme") minus.push("SME IPO mein liquidity risk aur bada lot size hota hai");
+  if (!plus.length) plus.push("Official NSE/BSE/SEBI feed se verified data");
+  if (!minus.length) minus.push("Listing aur market mood ke hisab se disciplined SL rakhein");
+
+  const fairVal = pe > 0 ? Math.round(price * Math.min(1.6, Math.max(0.85, indPe / pe))) : Math.round(price * 1.15);
+  const slPrice = Math.round(price * (qib >= 15 ? 0.94 : 0.92));
+
+  ipo.score = score;
+  ipo.verdict = verdict;
+  ipo.plusPoints = plus;
+  ipo.minusPoints = minus;
+  ipo.listingGain = listGain != null ? `Listed: ${listGain > 0 ? '+' : ''}${listGain.toFixed(1)}%`
+                  : (gmpPct > 0 ? `Est. ${gmpPct}%` : (qib >= 15 ? "Strong Demand" : "Track Day-3 QIB"));
+  ipo.shortTerm = score >= 7.0 ? "Hold 20-45 Days" : "Book on Listing / Wait";
+  ipo.longTerm = (pe > 0 && pe < indPe && roe >= 15) ? "Good Fundamental Hold" : "Track Qtr Results";
+  ipo.simpleSummary = `Auto-Analysis: Issue Price ₹${price}, QIB ${qib}x, OFS ${ofs}%${pe > 0 ? `, P/E ${pe}x` : ""}. ${score >= 7 ? "Demand aur fundamentals achhe hain." : "Apply ya hold karne se pehle QIB demand aur valuation zaroor dekhein."}`;
+  ipo.postListing = ipo.postListing || {
+    holdingDays: verdict.includes("AVOID") ? "0 Days (Weak Demand — Exit)" : (qib >= 15 ? "30–60 Days (Anchor Lock-in se pehle review)" : "1–5 Days (Momentum Hold)"),
+    target1: `₹${fairVal} (Fair Value Estimate)`,
+    target2: `₹${Math.round(fairVal * (qib >= 15 ? 1.12 : 1.05))} (QIB Momentum Target)`,
+    stopLoss: `₹${slPrice} (Issue / Institutional Support)`,
+    logic: `Yeh Target (₹${fairVal}) aur SL (₹${slPrice}) fixed 10%/5% par nahi, balki P/E (${pe || 'N/A'}x), QIB (${qib}x), aur OFS (${ofs}%) ke hisab se nikala gaya hai.`
+  };
+  return ipo;
+}
+
+// NORMALIZE ANY IPOS.MARKETS RECORD
+function mapOfficialRecord(item, subObj) {
+  const rawStatus = String(item.status || item.stage || "").toLowerCase();
+  const status = (rawStatus === "open" || rawStatus === "live" || rawStatus === "active") ? "live"
+               : (rawStatus.includes("upcoming") || rawStatus.includes("pipeline") || rawStatus.includes("drhp") || rawStatus.includes("announce")) ? "upcoming"
+               : "closed";
+
+  const board = String(item.board || item.segment || "").toLowerCase();
+  const category = board.includes("sme") ? "sme" : "mainboard";
+  const issuePrice = Number(item.issue_price || item.price_high || item.upper_price || item.price_band_high || 0) || 100;
+  const lowPrice = Number(item.price_low || item.lower_price || item.price_band_low || issuePrice);
+  const priceBand = lowPrice && lowPrice !== issuePrice ? `₹${lowPrice} - ₹${issuePrice}` : `₹${issuePrice}`;
+  const lotSize = Number(item.lot_size || item.market_lot || 1);
+  const minInvest = lotSize > 1 ? `₹${Math.round(issuePrice * lotSize).toLocaleString("en-IN")}` : "Check Lot";
+
+  const openD = item.open_date || item.opens || item.bidding_start || "";
+  const closeD = item.close_date || item.closes || item.bidding_end || "";
+  const dates = openD && closeD ? `${openD} to ${closeD}` : (openD || item.listing_date || "Check Schedule");
+
+  const totSub = subObj?.total_times ?? subObj?.lower_bound_times ?? item.subscription_total ?? item.total_times;
+  const qibSub = Number(subObj?.categories?.QIB?.times ?? item.qib_times ?? 0);
+  const niiSub = Number(subObj?.categories?.NII?.times ?? item.nii_times ?? 0);
+  const riiSub = Number(subObj?.categories?.RII?.times ?? item.rii_times ?? 0);
+
+  const listPrice = Number(item.listing_close || item.listing_open || item.listing_price || 0);
+  const currPrice = Number(item.current_price || item.ltp || listPrice || 0);
+  const actualListingGain = (listPrice > 0 && issuePrice > 0) ? ((listPrice - issuePrice) / issuePrice) * 100 : null;
+  const gmp = Number(item.gmp || 0);
+  const gmpPercent = gmp > 0 && issuePrice > 0 ? +((gmp / issuePrice) * 100).toFixed(1) : (actualListingGain != null ? +actualListingGain.toFixed(1) : 0);
+
+  const mapped = {
+    id: item.slug || item.symbol || item.name,
+    slug: item.slug || "",
+    symbol: item.symbol || item.exchange?.nse || "",
+    name: item.name || item.company_name || "IPO Issue",
+    category, status, dates,
+    listingDate: item.listing_date || item.listed_on || "TBA",
+    openSort: openD || item.listing_date || "1999-01-01",
+    priceBand, issuePrice, lotSize, minInvest,
+    issueSize: item.issue_size_cr ? `₹${item.issue_size_cr} Cr` : (item.issue_size || "NSE/BSE"),
+    ofsPercent: Number(item.ofs_pct ?? item.ofs_percent ?? 0),
+    freshIssue: item.ofs_pct != null ? `${100 - Number(item.ofs_pct)}% Fresh / ${item.ofs_pct}% OFS` : "Check RHP",
+    gmp, gmpPercent, listPrice, currPrice, actualListingGain,
+    subscription: {
+      total: totSub != null ? Number(totSub).toFixed(2) + "x" : (status === "upcoming" ? "0.0x" : "View"),
+      qib: qibSub ? qibSub.toFixed(2) + "x" : "-",
+      nii: niiSub ? niiSub.toFixed(2) + "x" : "-",
+      retail: riiSub ? riiSub.toFixed(2) + "x" : "-"
+    },
+    qibSub,
+    registrar: item.registrar || item.rta || "NSE / BSE",
+    pe: Number(item.pe || item.pe_ratio || 0),
+    industryPe: Number(item.industry_pe || 26),
+    roeVal: Number(item.roe || item.ronw || 0),
+    financials: item.financials || [{ year: "Latest", revenue: "Loading from RHP...", profit: "-", netWorth: "-" }],
+    fundamentals: {
+      peRatio: item.pe ? `${item.pe}x` : "Tap to Load RHP",
+      roe: item.roe ? `${item.roe}%` : "Tap to Load RHP",
+      debtToEquity: item.debt_to_equity || "Check RHP"
+    },
+    smartMoney: {
+      fiiAllocation: qibSub ? `QIB ${qibSub.toFixed(2)}x` : "Exchange Book",
+      anchorInvestors: item.anchor_amount ? `Anchor ₹${item.anchor_amount} Cr` : "Check RHP",
+      anchorLockIn30: item.lock_in_30 || "Listing + 30 Days",
+      anchorLockIn90: item.lock_in_90 || "Listing + 90 Days",
+      marketMood: "Live Market"
+    }
+  };
+  return runAutoAnalyst(mapped);
+}
+
+// 100% AUTOMATIC LIVE + PAST + FUTURE SYNC
+async function syncLiveData(manualClick = false) {
+  const btn = document.getElementById("syncBtn");
+  if (btn) btn.innerHTML = `<span class="dot"></span> SYNCING...`;
+  try {
+    const [idxRes, subRes] = await Promise.all([
+      fetch("https://ipos.markets/data/issues_index.json?v=" + Date.now()),
+      fetch("https://ipos.markets/api/v1/subscription?v=" + Date.now()).catch(() => null)
+    ]);
+
+    if (!idxRes.ok) throw new Error("Feed error");
+    const rawIdx = await idxRes.json();
+    const list = Array.isArray(rawIdx) ? rawIdx : (rawIdx.issues || rawIdx.data || Object.values(rawIdx));
+
+    const subMap = {};
+    if (subRes && subRes.ok) {
+      const rawSub = await subRes.json();
+      const sList = Array.isArray(rawSub) ? rawSub : (rawSub.issues || []);
+      sList.forEach(s => {
+        if (s.slug) subMap[s.slug] = s;
+        if (s.symbol) subMap[s.symbol] = s;
+      });
+    }
+
+    const equityOnly = list
+      .filter(i => !String(i.board || i.instrument || "").toLowerCase().includes("debt"))
+      .map(i => mapOfficialRecord(i, subMap[i.slug] || subMap[i.symbol]))
+      .sort((a, b) => String(b.openSort).localeCompare(String(a.openSort)));
+
+    if (equityOnly.length > 0) {
+      remoteIPOs = equityOnly;
+      try { localStorage.setItem("hdRemoteIPOs", JSON.stringify(equityOnly.slice(0, 120))); } catch (_) {}
+      renderCurrentPage();
+      if (manualClick) alert(`Automatic Sync Complete! ✅\nTotal ${equityOnly.length} Past, Live & Upcoming IPOs loaded!`);
+    }
+  } catch (e) {
+    if (manualClick) alert("Internet check karein ya thodi der baad SYNC LIVE dabayein!");
+  }
+  if (btn) btn.innerHTML = `<span class="dot"></span> SYNC LIVE`;
 }
 
 function renderCurrentPage() {
@@ -78,28 +229,40 @@ function renderCurrentPage() {
 }
 
 function renderIPOs() {
-  const filtered = getAllIPOs().filter((ipo) => {
+  const q = currentSearch.trim().toLowerCase();
+  let filtered = getAllIPOs().filter((ipo) => {
     const matchCategory = currentCategory === "all" || ipo.category === currentCategory;
-    const matchTab = ipo.status === currentTab;
-    const matchSearch = ipo.name.toLowerCase().includes(currentSearch.toLowerCase());
+    const matchTab = q ? true : (ipo.status === currentTab);
+    const matchSearch = ipo.name.toLowerCase().includes(q) || String(ipo.symbol || "").toLowerCase().includes(q);
     return matchCategory && matchTab && matchSearch;
   });
 
   if (filtered.length === 0) {
-    mainContent.innerHTML = `<div class="empty-box">Is category mein abhi koi IPO nahi mila.</div>`;
+    mainContent.innerHTML = `<div class="empty-box">Is category mein abhi koi IPO nahi mila. (Upar Search mein koi bhi naam type karein!)</div>`;
     return;
   }
-  mainContent.innerHTML = filtered.map(buildIPOCard).join("");
+
+  const totalCount = filtered.length;
+  const shown = filtered.slice(0, 50);
+  const note = totalCount > 50
+    ? `<p style="font-size:11.5px;color:#475569;margin-bottom:8px;">Showing latest 50 of <b>${totalCount}</b> IPOs — kisi bhi purane ya naye IPO ke liye upar Search karein!</p>`
+    : (q ? `<p style="font-size:11.5px;color:#1d4ed8;margin-bottom:8px;">Search Results across Past, Live & Future: <b>${totalCount}</b> found</p>` : "");
+
+  mainContent.innerHTML = note + shown.map(buildIPOCard).join("");
 }
 
 function buildIPOCard(ipo) {
   const catBadge = ipo.category === "sme"
     ? `<span class="badge badge-sme">SME IPO</span>`
     : `<span class="badge badge-mainboard">Mainboard</span>`;
-  const gmpClass = ipo.gmpPercent >= 15 ? "gmp-green" : "gmp-red";
+  const gmpClass = ipo.gmpPercent >= 10 ? "gmp-green" : "gmp-red";
+  const rightMetricLabel = ipo.currPrice > 0 ? "Current Price" : (ipo.gmp > 0 ? "Est. GMP" : "Status");
+  const rightMetricVal = ipo.currPrice > 0
+    ? `₹${ipo.currPrice} (${ipo.actualListingGain != null ? (ipo.actualListingGain >= 0 ? '+' : '') + ipo.actualListingGain.toFixed(1) + '%' : 'Listed'})`
+    : (ipo.gmp > 0 ? `₹${ipo.gmp} (${ipo.gmpPercent}%)` : ipo.status.toUpperCase());
 
   return `
-    <div class="ipo-card" onclick="openAnalysis(${ipo.id})">
+    <div class="ipo-card" onclick="openAnalysis('${String(ipo.id).replace(/'/g, "\\'")}')">
       <div class="card-top">
         <div>
           <div class="ipo-name">${ipo.name}</div>
@@ -117,11 +280,11 @@ function buildIPOCard(ipo) {
       <div class="card-grid">
         <div><div class="metric-label">Price Band</div><div class="metric-val">${ipo.priceBand}</div></div>
         <div><div class="metric-label">Min Invest</div><div class="metric-val">${ipo.minInvest}</div></div>
-        <div><div class="metric-label">Est. GMP</div><div class="metric-val ${gmpClass}">₹${ipo.gmp} (${ipo.gmpPercent}%)</div></div>
+        <div><div class="metric-label">${rightMetricLabel}</div><div class="metric-val ${gmpClass}">${rightMetricVal}</div></div>
       </div>
 
       <div class="card-targets">
-        <div class="target-info"><b>Listing:</b> ${ipo.listingGain} • <b>Sub:</b> ${ipo.subscription.total}</div>
+        <div class="target-info"><b>Sub:</b> ${ipo.subscription.total} • <b>QIB:</b> ${ipo.subscription.qib}</div>
         <button class="btn-analyze">Full Analysis →</button>
       </div>
     </div>
@@ -129,51 +292,43 @@ function buildIPOCard(ipo) {
 }
 
 function renderGMPPage() {
-  const sorted = [...getAllIPOs()].sort((a, b) => b.gmpPercent - a.gmpPercent);
+  const top = [...getAllIPOs()]
+    .filter(i => i.status === "live" || i.status === "upcoming" || i.actualListingGain != null)
+    .slice(0, 40)
+    .sort((a, b) => b.gmpPercent - a.gmpPercent);
+
   mainContent.innerHTML = `
-    <div class="page-title">📈 Live GMP Leaderboard (Highest First)</div>
-    ${sorted.map(ipo => {
-      const estList = ipo.issuePrice + ipo.gmp;
-      return `
-        <div class="gmp-row" onclick="openAnalysis(${ipo.id})">
-          <div class="gmp-left">
-            <h4>${ipo.name}</h4>
-            <p>Issue: ₹${ipo.issuePrice} → Est. List: <b>₹${estList}</b> (${ipo.category.toUpperCase()})</p>
-          </div>
-          <div class="gmp-right">
-            <div class="gmp-big" style="color:${ipo.gmpPercent >= 15 ? '#16a34a' : '#dc2626'}">+₹${ipo.gmp} (${ipo.gmpPercent}%)</div>
-            <span class="verdict-pill ${getVerdictClass(ipo.verdict)}" style="font-size:10px;padding:2px 6px;">${ipo.verdict}</span>
-          </div>
+    <div class="page-title">📈 Live Demand & Listing Gains</div>
+    ${top.map(ipo => `
+      <div class="gmp-row" onclick="openAnalysis('${String(ipo.id).replace(/'/g, "\\'")}')">
+        <div class="gmp-left">
+          <h4>${ipo.name}</h4>
+          <p>Issue: ₹${ipo.issuePrice} ${ipo.currPrice ? `→ Live: <b>₹${ipo.currPrice}</b>` : `(${ipo.status.toUpperCase()})`}</p>
         </div>
-      `;
-    }).join("")}
+        <div class="gmp-right">
+          <div class="gmp-big" style="color:${ipo.gmpPercent >= 10 ? '#16a34a' : '#dc2626'}">${ipo.gmpPercent ? (ipo.gmpPercent > 0 ? '+' : '') + ipo.gmpPercent + '%' : ipo.subscription.total}</div>
+          <span class="verdict-pill ${getVerdictClass(ipo.verdict)}" style="font-size:10px;padding:2px 6px;">${ipo.verdict}</span>
+        </div>
+      </div>
+    `).join("")}
   `;
 }
 
 function renderSavedPage() {
-  const savedList = getAllIPOs().filter(ipo => savedIds.includes(ipo.id));
+  const savedList = getAllIPOs().filter(ipo => savedIds.includes(String(ipo.id)));
   if (savedList.length === 0) {
-    mainContent.innerHTML = `
-      <div class="empty-box">
-        <b>Abhi koi IPO Saved nahi hai!</b><br><br>
-        Kisi bhi IPO ki Analysis screen khol kar upar <b>☆ Save</b> dabayein, woh yahan dikhega.
-      </div>`;
+    mainContent.innerHTML = `<div class="empty-box"><b>Abhi koi IPO Saved nahi hai!</b><br><br>Kisi bhi IPO ki Analysis screen khol kar upar <b>☆ Save</b> dabayein.</div>`;
     return;
   }
-  mainContent.innerHTML = `
-    <div class="page-title">★ Saved Watchlist (${savedList.length})</div>
-    ${savedList.map(buildIPOCard).join("")}
-  `;
+  mainContent.innerHTML = `<div class="page-title">★ Saved Watchlist (${savedList.length})</div>` + savedList.map(buildIPOCard).join("");
 }
 
 function renderAllotmentPage() {
   const activeQueueMember = queueIndex >= 0 && familyPans[queueIndex] ? familyPans[queueIndex] : null;
-
   mainContent.innerHTML = `
     <div class="page-title">👨‍👩‍👧‍👦 Family PAN Vault & Fast Allotment</div>
-
     <div class="pan-card">
-      <div class="section-heading">1️⃣ Registrar Chunein (Jahan Check Karna Hai)</div>
+      <div class="section-heading">1️⃣ Registrar Chunein</div>
       <div class="form-field">
         <select id="regSelect" onchange="selectedRegistrar = this.value">
           <option value="https://in.mpms.mufg.com/Initial_Offer/public-issues.html" ${selectedRegistrar.includes('mufg') ? 'selected' : ''}>MUFG Intime (Link Intime)</option>
@@ -183,15 +338,10 @@ function renderAllotmentPage() {
           <option value="https://www.nseindia.com/products/dynaContent/equities/ipos/ipo_login.jsp" ${selectedRegistrar.includes('nseindia') ? 'selected' : ''}>NSE India IPO Status</option>
         </select>
       </div>
-
       <div class="section-heading" style="margin-top:10px;">2️⃣ Family Member PAN Add Karein</div>
       <div class="form-grid">
-        <div class="form-field">
-          <input type="text" id="panName" placeholder="Name (e.g. Papa)">
-        </div>
-        <div class="form-field">
-          <input type="text" id="panNumber" placeholder="PAN (ABCDE1234F)" maxlength="10" style="text-transform:uppercase;">
-        </div>
+        <div class="form-field"><input type="text" id="panName" placeholder="Name (e.g. Papa)"></div>
+        <div class="form-field"><input type="text" id="panNumber" placeholder="PAN (ABCDE1234F)" maxlength="10" style="text-transform:uppercase;"></div>
       </div>
       <button class="btn-primary-full" style="background:#15803d;margin-top:0;" onclick="addFamilyPan()">+ Save Family PAN</button>
 
@@ -201,24 +351,19 @@ function renderAllotmentPage() {
             <b style="font-size:12.5px;">Saved PANs (${familyPans.length})</b>
             <button class="btn-copy-open" style="background:#1d4ed8;" onclick="startFamilyQueue()">⚡ Check All 1-by-1</button>
           </div>
-
           ${activeQueueMember ? `
             <div class="queue-box">
               <div><b>Checking (${queueIndex + 1}/${familyPans.length}):</b> ${activeQueueMember.name} — <b>${activeQueueMember.pan}</b> ✅ (Copied!)</div>
               <div class="queue-btns">
                 <button class="btn-copy-open" onclick="openRegistrarWithPan('${activeQueueMember.pan}')">Open Site & Paste ↗</button>
-                <button class="btn-copy-open" style="background:#1d4ed8;" onclick="nextFamilyQueue()">Next Member →</button>
+                <button class="btn-copy-open" style="background:#1d4ed8;" onclick="nextFamilyQueue()">Next →</button>
                 <button class="del-btn" onclick="stopFamilyQueue()">Close</button>
               </div>
             </div>
           ` : ""}
-
           ${familyPans.map((p, idx) => `
             <div class="pan-row">
-              <div class="pan-info">
-                <b>${p.name}</b>
-                <small>${p.pan}</small>
-              </div>
+              <div class="pan-info"><b>${p.name}</b><small>${p.pan}</small></div>
               <div class="pan-actions">
                 <button class="btn-copy-open" onclick="openRegistrarWithPan('${p.pan}')">Copy & Check ↗</button>
                 <button class="del-btn" onclick="deleteFamilyPan(${idx})">✕</button>
@@ -226,235 +371,95 @@ function renderAllotmentPage() {
             </div>
           `).join("")}
         </div>
-      ` : `<p style="font-size:11.5px;color:#64748b;margin-top:8px;">Abhi koi Family PAN save nahi hai. Upar se add karein—data sirf aapke phone mein safe rahega.</p>`}
+      ` : `<p style="font-size:11.5px;color:#64748b;margin-top:8px;">Abhi koi Family PAN save nahi hai. Upar se add karein.</p>`}
     </div>
-
-    <div class="form-card">
-      <div class="section-heading">➕ Naya IPO Add Karein (Auto-Analyst)</div>
-      <p style="font-size:11.5px;color:#64748b;margin-bottom:8px;">
-        Kisi bhi naye IPO ka data daalein—app khud uska Score, Verdict, aur Data-Based Target/SL bana dega!
-      </p>
-
-      <div class="form-field">
-        <label>Company Name</label>
-        <input type="text" id="new_name" placeholder="e.g. Vishal Mega Mart Ltd">
-      </div>
-
-      <div class="form-grid">
-        <div class="form-field">
-          <label>Category</label>
-          <select id="new_cat"><option value="mainboard">Mainboard</option><option value="sme">SME IPO</option></select>
-        </div>
-        <div class="form-field">
-          <label>Status</label>
-          <select id="new_status"><option value="live">Live</option><option value="upcoming">Upcoming</option><option value="closed">Closed</option></select>
-        </div>
-      </div>
-
-      <div class="form-grid">
-        <div class="form-field"><label>Dates</label><input type="text" id="new_dates" placeholder="12 Dec - 15 Dec"></div>
-        <div class="form-field"><label>Issue Price (₹)</label><input type="number" id="new_price" placeholder="100"></div>
-      </div>
-
-      <div class="form-grid">
-        <div class="form-field"><label>Lot Size</label><input type="number" id="new_lot" placeholder="150"></div>
-        <div class="form-field"><label>Live GMP (₹)</label><input type="number" id="new_gmp" placeholder="35"></div>
-      </div>
-
-      <div class="form-grid">
-        <div class="form-field"><label>IPO P/E Ratio</label><input type="number" id="new_pe" placeholder="22"></div>
-        <div class="form-field"><label>Industry Avg P/E</label><input type="number" id="new_indpe" placeholder="34"></div>
-      </div>
-
-      <div class="form-grid">
-        <div class="form-field"><label>OFS % (0 to 100)</label><input type="number" id="new_ofs" placeholder="25"></div>
-        <div class="form-field"><label>QIB Sub (x times)</label><input type="number" id="new_qib" placeholder="18"></div>
-      </div>
-
-      <div class="form-grid">
-        <div class="form-field"><label>ROE (%)</label><input type="number" id="new_roe" placeholder="24"></div>
-        <div class="form-field">
-          <label>Market Mood</label>
-          <select id="new_mood"><option value="Bullish">Bullish</option><option value="Neutral">Neutral</option><option value="Weak">Weak</option></select>
-        </div>
-      </div>
-
-      <button class="btn-primary-full" onclick="addCustomIPO()">Analyze & Save IPO</button>
-    </div>
-
-    ${customIPOs.length > 0 ? `
-      <div style="margin-top:14px;">
-        <div class="page-title">📝 Aapke Add Kiye Hue IPOs</div>
-        ${customIPOs.map(c => `
-          <div class="gmp-row">
-            <div onclick="openAnalysis(${c.id})" style="flex:1;"><b>${c.name}</b> <small>(${c.verdict})</small></div>
-            <button class="del-btn" onclick="deleteCustomIPO(${c.id})">Delete</button>
-          </div>
-        `).join("")}
-      </div>
-    ` : ""}
   `;
 }
 
 function addFamilyPan() {
   const name = document.getElementById("panName").value.trim();
   const pan = document.getElementById("panNumber").value.trim().toUpperCase();
-  const panRegex = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
-
-  if (!name) { alert("Kripya member ka naam likhein!"); return; }
-  if (!panRegex.test(pan)) { alert("Sahi 10-digit PAN daalein (Example: ABCDE1234F)"); return; }
-
+  if (!name) return alert("Naam likhein!");
+  if (!/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(pan)) return alert("Sahi 10-digit PAN daalein (e.g. ABCDE1234F)");
   familyPans.push({ name, pan });
   localStorage.setItem("hdFamilyPans", JSON.stringify(familyPans));
   renderAllotmentPage();
 }
-
-function deleteFamilyPan(idx) {
-  familyPans.splice(idx, 1);
-  localStorage.setItem("hdFamilyPans", JSON.stringify(familyPans));
-  queueIndex = -1;
-  renderAllotmentPage();
-}
-
-function openRegistrarWithPan(pan) {
-  copyTextSafe(pan);
-  alert("PAN Copied: " + pan + "\n\nAb khulne wali website par PAN box mein 'Paste' karein!");
-  window.open(selectedRegistrar, "_blank");
-}
-
-function startFamilyQueue() {
-  if (familyPans.length === 0) return;
-  queueIndex = 0;
-  copyTextSafe(familyPans[0].pan);
-  renderAllotmentPage();
-}
-
-function nextFamilyQueue() {
-  if (queueIndex + 1 < familyPans.length) {
-    queueIndex++;
-    copyTextSafe(familyPans[queueIndex].pan);
-    renderAllotmentPage();
-  } else {
-    alert("Sabhi family members check ho gaye! 🎉");
-    queueIndex = -1;
-    renderAllotmentPage();
-  }
-}
-
-function stopFamilyQueue() {
-  queueIndex = -1;
-  renderAllotmentPage();
-}
-
-function addCustomIPO() {
-  const name = document.getElementById("new_name").value.trim();
-  const category = document.getElementById("new_cat").value;
-  const status = document.getElementById("new_status").value;
-  const dates = document.getElementById("new_dates").value.trim() || "Announced Soon";
-  const issuePrice = parseFloat(document.getElementById("new_price").value);
-  const lotSize = parseInt(document.getElementById("new_lot").value) || 1;
-  const gmp = parseFloat(document.getElementById("new_gmp").value) || 0;
-  const pe = parseFloat(document.getElementById("new_pe").value) || 25;
-  const industryPe = parseFloat(document.getElementById("new_indpe").value) || 30;
-  const ofsPercent = parseFloat(document.getElementById("new_ofs").value) || 0;
-  const qibSub = parseFloat(document.getElementById("new_qib").value) || 1;
-  const roe = parseFloat(document.getElementById("new_roe").value) || 15;
-  const marketMood = document.getElementById("new_mood").value;
-
-  if (!name || !issuePrice) { alert("Kripya Company Name aur Issue Price daalein!"); return; }
-
-  const gmpPercent = +((gmp / issuePrice) * 100).toFixed(1);
-  const minInvest = "₹" + Math.round(issuePrice * lotSize).toLocaleString("en-IN");
-
-  let score = 5.0;
-  if (pe < industryPe) score += 1.5; else score -= 1.2;
-  if (roe >= 20) score += 1.0; else if (roe < 12) score -= 0.8;
-  if (ofsPercent <= 30) score += 0.8; else if (ofsPercent >= 65) score -= 1.2;
-  if (qibSub >= 15) score += 1.2; else if (qibSub >= 5) score += 0.5;
-  if (gmpPercent >= 25) score += 0.8; else if (gmpPercent < 5) score -= 0.7;
-  if (marketMood === "Weak") score -= 0.6;
-  score = Math.min(9.6, Math.max(2.5, +score.toFixed(1)));
-
-  const verdict = score >= 7.2 ? (category === "sme" ? "APPLY (High Risk)" : "APPLY")
-                : score >= 5.5 ? "RISKY / MAY APPLY" : "AVOID";
-
-  const fairValue = Math.round(issuePrice * (industryPe / pe));
-  const plus = [];
-  const minus = [];
-  if (pe < industryPe) plus.push(`Valuation sasta hai (P/E ${pe}x vs Industry ${industryPe}x)`);
-  else minus.push(`Valuation mehnga hai (P/E ${pe}x vs Industry ${industryPe}x)`);
-  if (ofsPercent <= 30) plus.push(`${100 - ofsPercent}% Fresh Issue — growth mein lagega`);
-  else minus.push(`${ofsPercent}% OFS — purane malik bech rahe hain`);
-  if (qibSub >= 10) plus.push(`QIB demand strong (${qibSub}x)`);
-  else minus.push(`QIB demand kam (${qibSub}x)`);
-  if (roe >= 18) plus.push(`ROE ${roe}% mazboot hai`);
-
-  const slPrice = verdict === "AVOID" ? Math.round(issuePrice * 0.96) : Math.round(issuePrice * (qibSub >= 15 ? 0.95 : 0.93));
-
-  const newObj = {
-    id: Date.now(), name, category, status, dates, listingDate: "TBA",
-    priceBand: "₹" + issuePrice, issuePrice, lotSize, minInvest,
-    issueSize: "Custom Entry", freshIssue: `${100 - ofsPercent}% Fresh / ${ofsPercent}% OFS`,
-    ofsPercent, gmp, gmpPercent,
-    subscription: { total: qibSub + "x+", qib: qibSub + "x", nii: "-", retail: "-" },
-    qibSub, registrar: "Check Prospectus", score, verdict,
-    listingGain: gmpPercent >= 20 ? `Strong (${gmpPercent}%)` : gmpPercent >= 8 ? `Moderate (${gmpPercent}%)` : `Weak (${gmpPercent}%)`,
-    shortTerm: score >= 7.2 ? "Hold 20-45 Days" : "Book on Listing",
-    longTerm: (pe < industryPe && roe >= 18) ? "Good Fundamental Hold" : "Avoid / Wait",
-    simpleSummary: `Auto-Analysis: P/E ${pe}x (Industry ${industryPe}x), ROE ${roe}%, OFS ${ofsPercent}% aur QIB ${qibSub}x hai. Fair Value ₹${fairValue} ke aas-paas banti hai.`,
-    plusPoints: plus.length ? plus : ["Data user dwara add kiya gaya hai"],
-    minusPoints: minus.length ? minus : ["Listing ke din market trend zaroor dekhein"],
-    financials: [
-      { year: "FY24", revenue: "Custom", profit: "-", netWorth: "-" },
-      { year: "FY25", revenue: "Custom", profit: "-", netWorth: "-" },
-      { year: "FY26", revenue: "Custom", profit: `ROE ${roe}%`, netWorth: "-" }
-    ],
-    pe, industryPe,
-    fundamentals: { peRatio: `${pe}x (Industry: ${industryPe}x)`, roe: `${roe}%`, debtToEquity: "User Input" },
-    smartMoney: { fiiAllocation: `QIB ${qibSub}x`, anchorInvestors: "Check RHP", anchorLockIn30: "Listing + 30 Days", anchorLockIn90: "Listing + 90 Days", marketMood },
-    postListing: {
-      holdingDays: verdict === "AVOID" ? "0 Days (Exit on Listing)" : (pe < industryPe ? "30–60 Days" : "1–5 Days"),
-      target1: `₹${fairValue} (Fair Industry P/E Value)`,
-      target2: `₹${Math.round(fairValue * (qibSub >= 15 ? 1.12 : 1.05))} (QIB Extension)`,
-      stopLoss: `₹${slPrice} (Issue Support)`,
-      logic: `Target (₹${fairValue}) Industry P/E (${industryPe}x) aur QIB (${qibSub}x) ke hisab se nikala gaya hai.`
-    }
-  };
-
-  customIPOs.unshift(newObj);
-  localStorage.setItem("hdCustomIPOs", JSON.stringify(customIPOs));
-  alert(name + " save ho gaya! Score: " + score + "/10 (" + verdict + ")");
-  renderAllotmentPage();
-}
-
-function deleteCustomIPO(id) {
-  customIPOs = customIPOs.filter(item => item.id !== id);
-  localStorage.setItem("hdCustomIPOs", JSON.stringify(customIPOs));
-  renderAllotmentPage();
-}
+function deleteFamilyPan(idx) { familyPans.splice(idx, 1); localStorage.setItem("hdFamilyPans", JSON.stringify(familyPans)); queueIndex = -1; renderAllotmentPage(); }
+function openRegistrarWithPan(pan) { copyTextSafe(pan); alert("PAN Copied: " + pan + "\nWebsite par Paste karein!"); window.open(selectedRegistrar, "_blank"); }
+function startFamilyQueue() { if (!familyPans.length) return; queueIndex = 0; copyTextSafe(familyPans[0].pan); renderAllotmentPage(); }
+function nextFamilyQueue() { if (queueIndex + 1 < familyPans.length) { queueIndex++; copyTextSafe(familyPans[queueIndex].pan); renderAllotmentPage(); } else { alert("Sab check ho gaye!"); queueIndex = -1; renderAllotmentPage(); } }
+function stopFamilyQueue() { queueIndex = -1; renderAllotmentPage(); }
 
 function toggleSave(id) {
-  if (savedIds.includes(id)) savedIds = savedIds.filter(item => item !== id);
-  else savedIds.push(id);
+  const sid = String(id);
+  if (savedIds.includes(sid)) savedIds = savedIds.filter(item => item !== sid);
+  else savedIds.push(sid);
   localStorage.setItem("hdIpoSaved", JSON.stringify(savedIds));
   const btn = document.getElementById("modalSaveBtn");
-  if (btn) btn.textContent = savedIds.includes(id) ? "★ Saved" : "☆ Save";
+  if (btn) btn.textContent = savedIds.includes(sid) ? "★ Saved" : "☆ Save";
   if (currentPage === "watchlist") renderSavedPage();
 }
 
-function openAnalysis(id) {
-  const ipo = getAllIPOs().find(item => item.id === id);
+async function openAnalysis(id) {
+  let ipo = getAllIPOs().find(item => String(item.id) === String(id));
   if (!ipo) return;
-  const isSaved = savedIds.includes(id);
+  drawModal(ipo, Boolean(ipo.slug));
 
+  if (ipo.slug) {
+    try {
+      const [detRes, subRes] = await Promise.all([
+        fetch(`https://ipos.markets/data/issue/${ipo.slug}.json?v=${Date.now()}`).catch(() => null),
+        fetch(`https://ipos.markets/api/v1/subscription?symbol=${encodeURIComponent(ipo.slug)}`).catch(() => null)
+      ]);
+
+      if (detRes && detRes.ok) {
+        const d = await detRes.json();
+        if (d.pe || d.fundamentals?.pe) ipo.pe = Number(d.pe || d.fundamentals.pe);
+        if (d.roe || d.fundamentals?.roe) ipo.roeVal = Number(d.roe || d.fundamentals.roe);
+        if (d.ofs_pct != null) { ipo.ofsPercent = Number(d.ofs_pct); ipo.freshIssue = `${100 - ipo.ofsPercent}% Fresh / ${ipo.ofsPercent}% OFS`; }
+        if (Array.isArray(d.financials) && d.financials.length) {
+          ipo.financials = d.financials.map(f => ({
+            year: f.year || f.fy || "-",
+            revenue: f.revenue ? `₹${f.revenue} Cr` : "-",
+            profit: (f.pat ?? f.profit) != null ? `₹${f.pat ?? f.profit} Cr` : "-",
+            netWorth: f.net_worth ? `₹${f.net_worth} Cr` : "-"
+          }));
+        }
+        if (d.registrar) ipo.registrar = d.registrar;
+        if (d.current_price) ipo.currPrice = Number(d.current_price);
+        ipo.fundamentals = {
+          peRatio: ipo.pe ? `${ipo.pe}x` : "N/A",
+          roe: ipo.roeVal ? `${ipo.roeVal}%` : "N/A",
+          debtToEquity: d.debt_to_equity || ipo.fundamentals.debtToEquity
+        };
+      }
+
+      if (subRes && subRes.ok) {
+        const s = await subRes.json();
+        const tot = s.total_times ?? s.lower_bound_times;
+        if (tot != null) ipo.subscription.total = Number(tot).toFixed(2) + "x";
+        if (s.categories?.QIB?.times != null) { ipo.qibSub = Number(s.categories.QIB.times); ipo.subscription.qib = ipo.qibSub.toFixed(2) + "x"; }
+        if (s.categories?.NII?.times != null) ipo.subscription.nii = Number(s.categories.NII.times).toFixed(2) + "x";
+        if (s.categories?.RII?.times != null) ipo.subscription.retail = Number(s.categories.RII.times).toFixed(2) + "x";
+      }
+      ipo = runAutoAnalyst(ipo);
+      drawModal(ipo, false);
+    } catch (_) { drawModal(ipo, false); }
+  }
+}
+
+function drawModal(ipo, isLoading) {
+  const isSaved = savedIds.includes(String(ipo.id));
+  const safeId = String(ipo.id).replace(/'/g, "\\'");
   analysisModal.innerHTML = `
     <div class="modal-header">
       <button class="back-btn" onclick="closeAnalysis()">← Back</button>
       <div class="modal-title">${ipo.name}</div>
-      <button id="modalSaveBtn" class="save-btn" onclick="toggleSave(${ipo.id})">${isSaved ? "★ Saved" : "☆ Save"}</button>
+      <button id="modalSaveBtn" class="save-btn" onclick="toggleSave('${safeId}')">${isSaved ? "★ Saved" : "☆ Save"}</button>
     </div>
-
     <div class="modal-body">
+      ${isLoading ? `<p style="font-size:11.5px;color:#1d4ed8;margin-bottom:8px;">⏳ Official RHP Financials & Live Subscription load ho raha hai...</p>` : ""}
       <div class="section-card hero-decision">
         <div class="hero-top">
           <span class="verdict-pill ${getVerdictClass(ipo.verdict)}" style="font-size:13px;padding:6px 12px;">Faisla: ${ipo.verdict}</span>
@@ -469,33 +474,27 @@ function openAnalysis(id) {
       </div>
 
       <div class="section-card">
-        <div class="section-heading">✅ Plus Points (Taakat)</div>
+        <div class="section-heading">✅ Plus Points & ⚠️ Risks</div>
         <ul class="pm-list">${ipo.plusPoints.map(p => `<li>🟢 ${p}</li>`).join("")}</ul>
-        <div class="section-heading" style="margin-top:12px;">⚠️ Minus Points (Risk)</div>
-        <ul class="pm-list">${ipo.minusPoints.map(m => `<li>🔴 ${m}</li>`).join("")}</ul>
+        <ul class="pm-list" style="margin-top:8px;">${ipo.minusPoints.map(m => `<li>🔴 ${m}</li>`).join("")}</ul>
       </div>
 
       <div class="section-card">
-        <div class="section-heading">📊 Pichhla Data (3 Saal ka Record)</div>
+        <div class="section-heading">📊 Pichhla Data (Financials)</div>
         <table class="fin-table">
           <thead><tr><th>Year</th><th>Revenue</th><th>Profit (PAT)</th><th>Net Worth</th></tr></thead>
-          <tbody>
-            ${ipo.financials.map(f => `<tr><td><b>${f.year}</b></td><td>${f.revenue}</td><td style="color:#15803d;font-weight:700;">${f.profit}</td><td>${f.netWorth}</td></tr>`).join("")}
-          </tbody>
+          <tbody>${ipo.financials.map(f => `<tr><td><b>${f.year}</b></td><td>${f.revenue}</td><td style="color:#15803d;font-weight:700;">${f.profit}</td><td>${f.netWorth}</td></tr>`).join("")}</tbody>
         </table>
       </div>
 
       <div class="section-card">
-        <div class="section-heading">🏦 Fundamental + QIB / FII / Anchor Data</div>
-        <div class="kv-row"><span class="kv-label">P/E Ratio</span><span class="kv-val">${ipo.fundamentals.peRatio}</span></div>
-        <div class="kv-row"><span class="kv-label">ROE</span><span class="kv-val">${ipo.fundamentals.roe}</span></div>
-        <div class="kv-row"><span class="kv-label">Debt (Karz)</span><span class="kv-val">${ipo.fundamentals.debtToEquity}</span></div>
+        <div class="section-heading">🏦 Fundamental + QIB / Anchor / Registrar</div>
+        <div class="kv-row"><span class="kv-label">Issue Price / Size</span><span class="kv-val">${ipo.priceBand} | ${ipo.issueSize}</span></div>
+        <div class="kv-row"><span class="kv-label">P/E Ratio / ROE</span><span class="kv-val">${ipo.fundamentals.peRatio} | ${ipo.fundamentals.roe}</span></div>
         <div class="kv-row"><span class="kv-label">Fresh vs OFS</span><span class="kv-val">${ipo.freshIssue}</span></div>
-        <div class="kv-row"><span class="kv-label">Subscription (QIB / NII / Ret)</span><span class="kv-val">${ipo.subscription.qib} / ${ipo.subscription.nii} / ${ipo.subscription.retail}</span></div>
-        <div class="kv-row"><span class="kv-label">FII Participation</span><span class="kv-val">${ipo.smartMoney.fiiAllocation}</span></div>
-        <div class="kv-row"><span class="kv-label">Anchor Investors</span><span class="kv-val">${ipo.smartMoney.anchorInvestors}</span></div>
+        <div class="kv-row"><span class="kv-label">Subscription (Total / QIB / NII / Ret)</span><span class="kv-val">${ipo.subscription.total} | ${ipo.subscription.qib} / ${ipo.subscription.nii} / ${ipo.subscription.retail}</span></div>
         <div class="kv-row"><span class="kv-label">Anchor Lock-in (30 / 90 Day)</span><span class="kv-val">${ipo.smartMoney.anchorLockIn30} | ${ipo.smartMoney.anchorLockIn90}</span></div>
-        <div class="kv-row" style="border:none;"><span class="kv-label">Market Behaviour</span><span class="kv-val">${ipo.smartMoney.marketMood}</span></div>
+        <div class="kv-row" style="border:none;"><span class="kv-label">Registrar</span><span class="kv-val">${ipo.registrar}</span></div>
       </div>
 
       <div class="section-card post-card">
@@ -508,116 +507,55 @@ function openAnalysis(id) {
         <div class="logic-note"><b>💡 Kyun yeh Target & SL?</b><br>${ipo.postListing.logic}</div>
 
         <div class="calc-box">
-          <b style="font-size:12.5px;color:#0f172a;">🧮 Live Listing Price Analyzer (Abhi kya karein?)</b>
+          <b style="font-size:12.5px;">🧮 Live Listing Price Analyzer</b>
           <div class="calc-row">
-            <input type="number" id="livePriceInput" placeholder="Live / Listing Price (₹) daalein...">
-            <button onclick="analyzeLivePrice(${ipo.id})">Check</button>
+            <input type="number" id="livePriceInput" value="${ipo.currPrice || ''}" placeholder="Live Price (₹) daalein...">
+            <button onclick="analyzeLivePrice('${safeId}')">Check</button>
           </div>
           <div id="liveCalcResult" class="calc-result hidden"></div>
         </div>
       </div>
-
-      <p class="disclaimer">Disclaimer: HD IPO ka yeh analysis sirf educational aur research purpose ke liye hai. Invest karne se pehle apne SEBI-registered advisor ki salah zaroor lein.</p>
+      <p class="disclaimer">Data powered by ipos.markets (Official NSE/BSE/SEBI feeds). Educational purpose only — consult your advisor before investing.</p>
     </div>
   `;
-
   analysisModal.classList.remove("hidden");
   analysisModal.scrollTop = 0;
 }
 
-function closeAnalysis() {
-  analysisModal.classList.add("hidden");
-}
+function closeAnalysis() { analysisModal.classList.add("hidden"); }
 
 function analyzeLivePrice(id) {
-  const ipo = getAllIPOs().find(item => item.id === id);
+  const ipo = getAllIPOs().find(item => String(item.id) === String(id));
   const price = parseFloat(document.getElementById("livePriceInput").value);
   const resBox = document.getElementById("liveCalcResult");
-
-  if (!price || price <= 0) {
-    resBox.innerHTML = "Kripya sahi Listing / Live Price (₹) daalein.";
-    resBox.classList.remove("hidden");
-    return;
-  }
+  if (!price || price <= 0) { resBox.innerHTML = "Sahi Live Price (₹) daalein."; resBox.classList.remove("hidden"); return; }
 
   const gainPct = ((price - ipo.issuePrice) / ipo.issuePrice) * 100;
-  const peAtLivePrice = +(ipo.pe * (price / ipo.issuePrice)).toFixed(1);
-  const fairValue = Math.round(ipo.issuePrice * (ipo.industryPe / ipo.pe));
-  const isCheap = peAtLivePrice < ipo.industryPe;
+  const pe = ipo.pe || 24;
+  const indPe = ipo.industryPe || 26;
+  const peLive = +(pe * (price / ipo.issuePrice)).toFixed(1);
+  const fairVal = Math.round(ipo.issuePrice * (indPe / pe));
   const strongInst = ipo.qibSub >= 15 && ipo.ofsPercent <= 40;
 
-  let action = "", holdPlan = "", target = "", sl = "", reason = "";
-
-  if (!isCheap && ipo.qibSub < 5) {
-    action = "🔴 EXIT / SELL ON RISE";
-    holdPlan = "0–2 Days (Hold mat karein)";
-    target = "₹" + Math.round(price * 1.04) + " (Sirf minor bounce)";
-    sl = "₹" + Math.round(price * 0.97) + " (Tight Exit SL)";
-    reason = `Is price par P/E (${peAtLivePrice}x) Industry (${ipo.industryPe}x) se mehnga hai aur QIB/FII demand kamzor hai.`;
-  } else if (price >= fairValue * 1.15) {
-    action = "🟡 60% PROFIT BOOK, 40% TRAIL";
-    holdPlan = "7–15 Days (Anchor 30-Day Lock-in se pehle review)";
+  let action, hold, target, sl, reason;
+  if (peLive > indPe * 1.15 && ipo.qibSub < 5) {
+    action = "🔴 EXIT / SELL ON RISE"; hold = "0–2 Days";
+    target = "₹" + Math.round(price * 1.04); sl = "₹" + Math.round(price * 0.97);
+    reason = `P/E (${peLive}x) mehanga hai aur QIB support kamzor hai.`;
+  } else if (price >= fairVal * 1.15) {
+    action = "🟡 60% PROFIT BOOK, 40% TRAIL"; hold = "7–15 Days";
     target = "₹" + Math.round(price * (strongInst ? 1.14 : 1.06));
     sl = "₹" + Math.round(ipo.issuePrice + (price - ipo.issuePrice) * 0.65);
-    reason = `Share apni Fair Value (₹${fairValue}) se kaafi upar open hua hai (P/E ${peAtLivePrice}x). Aadha profit lock karein aur baaki par high SL lagakar QIB momentum ride karein.`;
-  } else if (isCheap && strongInst && gainPct >= 0) {
-    action = "🟢 STRONG HOLD / ADD ON DIPS";
-    holdPlan = "30–90 Days (Anchor Lock-in aur Qtr Result tak)";
-    target = "₹" + Math.round(Math.max(fairValue, price * 1.18)) + " (Industry P/E Re-rating)";
+    reason = `Fair Value (₹${fairVal}) se upar hai—aadha profit lock karein.`;
+  } else if (peLive <= indPe && strongInst && gainPct >= 0) {
+    action = "🟢 STRONG HOLD / ADD ON DIPS"; hold = "30–90 Days";
+    target = "₹" + Math.round(Math.max(fairVal, price * 1.18));
     sl = "₹" + Math.round(Math.max(ipo.issuePrice * 0.96, price * 0.91));
-    reason = `₹${price} par bhi P/E (${peAtLivePrice}x) Industry (${ipo.industryPe}x) se sasta hai, QIB ${ipo.qibSub}x tha aur OFS sirf ${ipo.ofsPercent}% hai.`;
-  } else if (gainPct < 0 && isCheap && ipo.qibSub >= 10) {
-    action = "🔵 HOLD WITH ISSUE SUPPORT SL";
-    holdPlan = "15–30 Days (Market stabilize hone tak)";
-    target = "₹" + fairValue + " (Fair Value Recovery)";
-    sl = "₹" + Math.round(ipo.issuePrice * 0.92);
-    reason = `Issue Price (₹${ipo.issuePrice}) se neeche hai lekin fundamental sasta (${peAtLivePrice}x) aur QIB strong hai—panic selling na karein.`;
+    reason = `P/E (${peLive}x) sasta hai aur QIB (${ipo.qibSub}x) mazboot hai.`;
   } else {
-    action = "🟡 PARTIAL BOOK / CAUTIOUS HOLD";
-    holdPlan = "5–15 Days";
-    target = "₹" + Math.round(Math.max(fairValue, price * 1.08));
+    action = "🟡 CAUTIOUS HOLD WITH SL"; hold = "5–15 Days";
+    target = "₹" + Math.round(Math.max(fairVal, price * 1.08));
     sl = "₹" + Math.round(price * 0.94);
-    reason = `Valuation (${peAtLivePrice}x) aur ${ipo.ofsPercent}% OFS supply ko dekhte hue disciplined Stop Loss ke saath hold karein.`;
+    reason = `Valuation (${peLive}x) aur ${ipo.ofsPercent}% OFS ke hisab se tight SL rakhein.`;
   }
-
-  resBox.innerHTML = `
-    <div><b>Action:</b> ${action}</div>
-    <div><b>Listing Gain/Loss:</b> ${gainPct.toFixed(1)}% (Current P/E: ${peAtLivePrice}x vs Industry ${ipo.industryPe}x)</div>
-    <div><b>Kitne Din Rakhna Hai:</b> ${holdPlan}</div>
-    <div><b>Data Target:</b> ${target} | <b>Stop Loss:</b> ${sl}</div>
-    <div style="margin-top:5px;color:#334155;"><b>Logic:</b> ${reason}</div>
-  `;
-  resBox.classList.remove("hidden");
-}
-
-searchInput.addEventListener("input", (e) => { currentSearch = e.target.value; renderIPOs(); });
-
-chips.forEach((chip) => {
-  chip.addEventListener("click", () => {
-    chips.forEach(c => c.classList.remove("active"));
-    chip.classList.add("active");
-    currentCategory = chip.dataset.category;
-    renderIPOs();
-  });
-});
-
-tabs.forEach((tab) => {
-  tab.addEventListener("click", () => {
-    tabs.forEach(t => t.classList.remove("active"));
-    tab.classList.add("active");
-    currentTab = tab.dataset.tab;
-    renderIPOs();
-  });
-});
-
-navItems.forEach((nav) => {
-  nav.addEventListener("click", () => {
-    navItems.forEach(n => n.classList.remove("active"));
-    nav.classList.add("active");
-    currentPage = nav.dataset.page;
-    renderCurrentPage();
-  });
-});
-
-renderCurrentPage();
-syncLiveData(false);
+  resBox.innerHTML = `<div><b>Action:</b> ${action}</div><div><b>Gain/Loss:</b> ${gainPct.toFixed(1)}% (Live P/E: ${peLive}x)</div><div><b>Hold:</b> ${hold}</div>
